@@ -120,6 +120,7 @@ h2 { margin-bottom: 0; font-size: 20px; line-height: 1.15; font-weight: 750; let
 .secondary-button { color: #6656bb; background: #eeebff; }
 .primary-button:hover, .secondary-button:hover { transform: translateY(-2px); }
 .primary-button.full { width: 100%; min-height: 47px; margin-top: 2px; }
+.primary-button.small { min-height: 31px; padding: 0 10px; font-size: 10px; }
 .secondary-button.small { min-height: 32px; padding: 0 10px; font-size: 10px; }
 .finance-hero { padding: 20px; }
 .finance-brand { gap: 11px; }
@@ -196,6 +197,8 @@ h2 { margin-bottom: 0; font-size: 20px; line-height: 1.15; font-weight: 750; let
 .card-spend { display: flex; gap: 38px; margin: 21px 0 15px; }
 .card-spend strong { font-size: 20px; letter-spacing: -.05em; }
 .card-management { display: flex; gap: 15px; margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
+.card-dates { display: flex; gap: 18px; margin-top: 14px; color: var(--muted); font-size: 10px; }
+.card-dates strong { color: var(--ink); font-weight: 760; }
 .danger-text { color: #bc6c60; }
 .full-danger { width: 100%; justify-content: center; padding: 10px; border-radius: 11px; background: #fff1ee; }
 .expense-row { display: flex; align-items: center; gap: 11px; min-height: 70px; padding: 12px 15px; border-bottom: 1px solid var(--line); }
