@@ -199,6 +199,7 @@ h2 { margin-bottom: 0; font-size: 20px; line-height: 1.15; font-weight: 750; let
 .card-management { display: flex; gap: 15px; margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
 .card-dates { display: flex; gap: 18px; margin-top: 14px; color: var(--muted); font-size: 10px; }
 .card-dates strong { color: var(--ink); font-weight: 760; }
+.card-empty { min-width: 300px; min-height: 150px; padding: 22px; border: 1px dashed var(--line-strong); border-radius: 20px; background: rgba(255,255,255,.65); }
 .danger-text { color: #bc6c60; }
 .full-danger { width: 100%; justify-content: center; padding: 10px; border-radius: 11px; background: #fff1ee; }
 .expense-row { display: flex; align-items: center; gap: 11px; min-height: 70px; padding: 12px 15px; border-bottom: 1px solid var(--line); }

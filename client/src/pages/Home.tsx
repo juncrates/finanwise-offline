@@ -34,7 +34,7 @@ import {
   X,
 } from "lucide-react";
 
-const STORAGE_KEY = "finanwise-offline-v1";
+const STORAGE_KEY = "finanwise-offline-v2";
 
 type Tab = "overview" | "finances" | "cards" | "reports";
 type Modal = "expense" | "editExpense" | "card" | "editCard" | "launchFinance" | "launchCard" | "payBill" | "anticipate" | "backup" | null;
@@ -87,6 +87,7 @@ type PaymentEntry = {
   discount: number;
   paidAt: string;
   cardId?: string;
+  statementKey?: string;
 };
 
 type Store = {
@@ -107,22 +108,14 @@ const seedStore: Store = {
       financed: 68307.56,
       installment: 2159.58,
       term: 48,
-      paidCount: 4,
+      paidCount: 0,
       firstDue: "2026-05-25",
       monthlyRate: 1.85,
       cet: 2.62,
     },
   ],
-  cards: [
-    { id: "nubank", name: "Nubank Ultravioleta", bank: "Nubank", lastFour: "4821", limit: 8000, dueDay: 10, closingDay: 3, color: "graphite" },
-    { id: "itau", name: "Itaú Platinum", bank: "Itaú", lastFour: "0918", limit: 5000, dueDay: 15, closingDay: 8, color: "navy" },
-  ],
-  expenses: [
-    { id: "exp-1", cardId: "nubank", description: "Notebook Lenovo", person: "Josenildo", amount: 3599.9, installments: 10, installmentsPaid: 3, date: "2026-06-12" },
-    { id: "exp-2", cardId: "nubank", description: "Mercado do mês", person: "Josenildo", amount: 624.7, installments: 1, installmentsPaid: 0, date: "2026-09-01" },
-    { id: "exp-3", cardId: "itau", description: "Passagens Natal → Recife", person: "Ana Paula", amount: 1180, installments: 4, installmentsPaid: 1, date: "2026-08-21" },
-    { id: "exp-4", cardId: "itau", description: "Consulta veterinária", person: "Rafael", amount: 420, installments: 2, installmentsPaid: 0, date: "2026-09-02" },
-  ],
+  cards: [],
+  expenses: [],
   payments: [],
 };
 
@@ -143,6 +136,34 @@ function addMonths(dateString: string, count: number) {
   const date = new Date(`${dateString}T12:00:00`);
   date.setMonth(date.getMonth() + count);
   return date.toISOString().slice(0, 10);
+}
+
+function statementKey(dateString: string, closingDay: number) {
+  const date = new Date(`${dateString}T12:00:00`);
+  if (date.getDate() > closingDay) date.setMonth(date.getMonth() + 1);
+  return date.toISOString().slice(0, 7);
+}
+
+function expenseAmountForStatement(expense: Expense, closingDay: number, cycle: string) {
+  const installmentAmount = expense.amount / expense.installments;
+  return Array.from({ length: expense.installments }, (_, index) => statementKey(addMonths(expense.date, index), closingDay) === cycle ? installmentAmount : 0).reduce((sum, amount) => sum + amount, 0);
+}
+
+function cardOutstandingAmount(card: CardData, expenses: Expense[], payments: PaymentEntry[]) {
+  const cycles = new Set(expenses.filter((expense) => expense.cardId === card.id).flatMap((expense) => Array.from({ length: expense.installments }, (_, index) => statementKey(addMonths(expense.date, index), card.closingDay))));
+  return Array.from(cycles).reduce((total, cycle) => {
+    const gross = expenses.filter((expense) => expense.cardId === card.id).reduce((sum, expense) => sum + expenseAmountForStatement(expense, card.closingDay, cycle), 0);
+    const paid = payments.filter((payment) => payment.kind === "bill" && payment.cardId === card.id && payment.statementKey === cycle).reduce((sum, payment) => sum + payment.paidAmount, 0);
+    return total + Math.max(0, gross - paid);
+  }, 0);
+}
+
+function cardColorForBank(bank: string): CardData["color"] {
+  const value = bank.toLowerCase();
+  if (value.includes("nubank")) return "graphite";
+  if (value.includes("itaú") || value.includes("itau") || value.includes("santander") || value.includes("bradesco")) return "coral";
+  if (value.includes("inter") || value.includes("c6") || value.includes("neon")) return "navy";
+  return "lavender";
 }
 
 function safeLoad(): Store {
@@ -201,11 +222,11 @@ function ModalShell({ title, eyebrow, onClose, children }: { title: string; eyeb
 export default function Home() {
   const [store, setStore] = useState<Store>(() => safeLoad());
   const [activeTab, setActiveTab] = useState<Tab>("overview");
-  const [selectedCard, setSelectedCard] = useState("nubank");
+  const [selectedCard, setSelectedCard] = useState("");
   const [modal, setModal] = useState<Modal>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [anticipationQty, setAnticipationQty] = useState(2);
-  const [expenseForm, setExpenseForm] = useState({ description: "", person: "", amount: "", installments: "1", cardId: "nubank" });
+  const [expenseForm, setExpenseForm] = useState({ description: "", person: "", amount: "", installments: "1", cardId: "nubank", date: new Date().toISOString().slice(0, 10) });
   const [cardForm, setCardForm] = useState({ name: "", bank: "", lastFour: "", limit: "", dueDay: "10", closingDay: "3" });
   const [editingExpenseId, setEditingExpenseId] = useState<string | null>(null);
   const [editingCardId, setEditingCardId] = useState<string | null>(null);
@@ -221,7 +242,7 @@ export default function Home() {
 
   useEffect(() => {
     if ("serviceWorker" in navigator) {
-      navigator.serviceWorker.register("/sw.js").catch(() => undefined);
+      navigator.serviceWorker.register("./sw.js", { updateViaCache: "none" }).catch(() => undefined);
     }
   }, []);
 
@@ -236,19 +257,22 @@ export default function Home() {
   const remainingLoan = finance ? Math.max(0, finance.term - finance.paidCount) * finance.installment : 0;
   const cardCommitment = useMemo(
     () => store.cards.reduce((sum, card) => {
-      const bill = store.expenses.filter((expense) => expense.cardId === card.id).reduce((total, expense) => total + expense.amount / expense.installments, 0);
-      const paid = store.payments.find((payment) => payment.kind === "bill" && payment.cardId === card.id);
+      const cycle = statementKey(new Date().toISOString().slice(0, 10), card.closingDay);
+      const bill = store.expenses.filter((expense) => expense.cardId === card.id).reduce((total, expense) => total + expenseAmountForStatement(expense, card.closingDay, cycle), 0);
+      const paid = store.payments.find((payment) => payment.kind === "bill" && payment.cardId === card.id && payment.statementKey === cycle);
       return sum + Math.max(0, bill - (paid?.paidAmount ?? 0));
     }, 0),
     [store.cards, store.expenses, store.payments],
   );
   const selectedCardData = store.cards.find((card) => card.id === selectedCard) ?? store.cards[0];
   const selectedCardExpenses = store.expenses.filter((expense) => expense.cardId === selectedCardData?.id);
-  const selectedCardGrossBill = selectedCardExpenses.reduce((sum, expense) => sum + expense.amount / expense.installments, 0);
-  const selectedCardBillPayment = store.payments.find((payment) => payment.kind === "bill" && payment.cardId === selectedCardData?.id);
+  const selectedStatementKey = selectedCardData ? statementKey(new Date().toISOString().slice(0, 10), selectedCardData.closingDay) : "";
+  const selectedCardGrossBill = selectedCardExpenses.reduce((sum, expense) => sum + expenseAmountForStatement(expense, selectedCardData?.closingDay ?? 3, selectedStatementKey), 0);
+  const selectedCardBillPayment = store.payments.find((payment) => payment.kind === "bill" && payment.cardId === selectedCardData?.id && payment.statementKey === selectedStatementKey);
   const selectedCardBill = Math.max(0, selectedCardGrossBill - (selectedCardBillPayment?.paidAmount ?? 0));
-  const selectedCardStatus = selectedCardBill <= 0 && selectedCardGrossBill > 0 ? "paga" : selectedCardBillPayment ? "parcialmente paga" : "aberta";
-  const selectedCardUsed = Math.min(100, selectedCardBill / Math.max(1, selectedCardData?.limit ?? 1) * 100);
+  const selectedCardStatus = selectedCardGrossBill <= 0 ? "aberta" : selectedCardBill <= 0 ? "paga" : selectedCardBillPayment ? "parcialmente paga" : "aberta";
+  const selectedCardOutstanding = selectedCardData ? cardOutstandingAmount(selectedCardData, store.expenses, store.payments) : 0;
+  const selectedCardUsed = Math.min(100, selectedCardOutstanding / Math.max(1, selectedCardData?.limit ?? 1) * 100);
   const nextDue = finance ? addMonths(finance.firstDue, finance.paidCount) : "2026-09-25";
   const nextInstallmentNumber = finance ? finance.paidCount + 1 : 1;
 
@@ -303,8 +327,8 @@ export default function Home() {
     if (!selectedCardData || selectedCardGrossBill <= 0) return;
     const paid = Number(launchAmount.replace(",", ".")) || selectedCardBill;
     const discount = Math.max(0, selectedCardBill - paid);
-    const entry: PaymentEntry = { id: `payment-${Date.now()}`, kind: "bill", referenceId: selectedCardData.id, cardId: selectedCardData.id, label: `Fatura · ${selectedCardData.name}`, scheduledAmount: selectedCardBill, paidAmount: paid, discount, paidAt: paymentDate };
-    const nextStore = { ...store, payments: [entry, ...store.payments.filter((payment) => !(payment.kind === "bill" && payment.cardId === selectedCardData.id))] };
+    const entry: PaymentEntry = { id: `payment-${Date.now()}`, kind: "bill", referenceId: selectedCardData.id, cardId: selectedCardData.id, statementKey: selectedStatementKey, label: `Fatura ${selectedStatementKey} · ${selectedCardData.name}`, scheduledAmount: selectedCardBill, paidAmount: paid, discount, paidAt: paymentDate };
+    const nextStore = { ...store, payments: [entry, ...store.payments.filter((payment) => !(payment.kind === "bill" && payment.cardId === selectedCardData.id && payment.statementKey === selectedStatementKey))] };
     persistStore(nextStore);
     setStore(nextStore);
     setModal(null);
@@ -336,7 +360,7 @@ export default function Home() {
 
   const openExpenseEditor = (expense: Expense) => {
     setEditingExpenseId(expense.id);
-    setExpenseForm({ description: expense.description, person: expense.person, amount: String(expense.amount), installments: String(expense.installments), cardId: expense.cardId });
+    setExpenseForm({ description: expense.description, person: expense.person, amount: String(expense.amount), installments: String(expense.installments), cardId: expense.cardId, date: expense.date });
     setModal("editExpense");
   };
 
@@ -347,7 +371,7 @@ export default function Home() {
     if (!editingExpenseId || !expenseForm.description.trim() || !expenseForm.person.trim() || !amount) return;
     const nextStore = {
       ...store,
-      expenses: store.expenses.map((expense) => expense.id === editingExpenseId ? { ...expense, description: expenseForm.description.trim(), person: expenseForm.person.trim(), amount, installments: installmentsCount, cardId: expenseForm.cardId, installmentsPaid: Math.min(expense.installmentsPaid, installmentsCount) } : expense),
+      expenses: store.expenses.map((expense) => expense.id === editingExpenseId ? { ...expense, description: expenseForm.description.trim(), person: expenseForm.person.trim(), amount, installments: installmentsCount, cardId: expenseForm.cardId, date: expenseForm.date, installmentsPaid: Math.min(expense.installmentsPaid, installmentsCount) } : expense),
     };
     persistStore(nextStore);
     setStore(nextStore);
@@ -369,7 +393,7 @@ export default function Home() {
     const dueDay = Math.min(31, Math.max(1, Number(cardForm.dueDay) || 10));
     const closingDay = Math.min(31, Math.max(1, Number(cardForm.closingDay) || 3));
     if (!editingCardId || !cardForm.name.trim() || !cardForm.bank.trim() || !cardForm.lastFour || !limit) return;
-    const nextStore = { ...store, cards: store.cards.map((card) => card.id === editingCardId ? { ...card, name: cardForm.name.trim(), bank: cardForm.bank.trim(), lastFour: cardForm.lastFour.slice(-4), limit, dueDay, closingDay } : card) };
+    const nextStore = { ...store, cards: store.cards.map((card) => card.id === editingCardId ? { ...card, name: cardForm.name.trim(), bank: cardForm.bank.trim(), lastFour: cardForm.lastFour.slice(-4), limit, dueDay, closingDay, color: cardColorForBank(cardForm.bank) } : card) };
     persistStore(nextStore);
     setStore(nextStore);
     setModal(null);
@@ -382,7 +406,7 @@ export default function Home() {
     const nextStore = { ...store, cards: store.cards.filter((card) => card.id !== id), expenses: store.expenses.filter((expense) => expense.cardId !== id) };
     persistStore(nextStore);
     setStore(nextStore);
-    setSelectedCard(nextStore.cards[0].id);
+    setSelectedCard(nextStore.cards[0]?.id ?? "");
     setModal(null);
     setToast("Cartão e lançamentos vinculados excluídos.");
   };
@@ -400,7 +424,7 @@ export default function Home() {
     event.preventDefault();
     const amount = Number(expenseForm.amount.replace(",", "."));
     const installmentsCount = Math.max(1, Number(expenseForm.installments));
-    if (!expenseForm.description.trim() || !expenseForm.person.trim() || !amount) return;
+    if (!expenseForm.description.trim() || !expenseForm.person.trim() || !amount || !expenseForm.cardId) return;
     const expense: Expense = {
       id: `expense-${Date.now()}`,
       cardId: expenseForm.cardId,
@@ -415,7 +439,7 @@ export default function Home() {
     persistStore(nextStore);
     setStore(nextStore);
     setSelectedCard(expense.cardId);
-    setExpenseForm({ description: "", person: "", amount: "", installments: "1", cardId: selectedCardData?.id ?? "nubank" });
+    setExpenseForm({ description: "", person: "", amount: "", installments: "1", cardId: selectedCardData?.id ?? "", date: new Date().toISOString().slice(0, 10) });
     setModal(null);
     setToast("Despesa adicionada ao controle.");
   };
@@ -432,7 +456,7 @@ export default function Home() {
       limit,
       dueDay: Math.min(31, Math.max(1, Number(cardForm.dueDay) || 10)),
       closingDay: Math.min(31, Math.max(1, Number(cardForm.closingDay) || 3)),
-      color: ["lavender", "coral", "navy"][store.cards.length % 3] as CardData["color"],
+      color: cardColorForBank(cardForm.bank),
     };
     setStore((current) => ({ ...current, cards: [...current.cards, card] }));
     setSelectedCard(card.id);
@@ -470,8 +494,9 @@ export default function Home() {
         const parsed = JSON.parse(String(reader.result));
         const incoming = parsed.data ?? parsed;
         if (!incoming.finances || !incoming.cards || !incoming.expenses) throw new Error("invalid");
-        setStore(incoming);
-        setSelectedCard(incoming.cards[0]?.id ?? "");
+        const normalized = { ...incoming, cards: incoming.cards.map((card: CardData) => ({ ...card, dueDay: card.dueDay ?? 10, closingDay: card.closingDay ?? 3 })) };
+        setStore(normalized);
+        setSelectedCard(normalized.cards[0]?.id ?? "");
         setToast("Backup restaurado com sucesso.");
       } catch {
         setToast("Não foi possível ler esse backup.");
@@ -483,7 +508,7 @@ export default function Home() {
 
   const resetData = () => {
     setStore(seedStore);
-    setSelectedCard("nubank");
+    setSelectedCard("");
     setToast("Dados de demonstração restaurados.");
   };
 
@@ -569,8 +594,8 @@ export default function Home() {
         {activeTab === "cards" && (
           <section className="page-section">
             <div className="page-title-row"><div><p className="eyebrow">módulo 02</p><h1>Cartões</h1><p className="subtitle">Limites, compras e quem precisa acertar.</p></div><button className="primary-button" onClick={() => setModal("card")}><Plus size={17} /> novo cartão</button></div>
-            <div className="cards-scroller">{store.cards.map((card) => { const bill = store.expenses.filter((expense) => expense.cardId === card.id).reduce((sum, expense) => sum + expense.amount / expense.installments, 0); const paid = store.payments.find((payment) => payment.kind === "bill" && payment.cardId === card.id)?.paidAmount ?? 0; const outstanding = Math.max(0, bill - paid); return <button key={card.id} className={`credit-card ${card.color} ${selectedCard === card.id ? "selected" : ""}`} onClick={() => setSelectedCard(card.id)}><div className="credit-card-top"><span>{card.bank}</span><CreditCard size={20} /></div><div className="credit-card-number">••••  ••••  ••••  {card.lastFour}</div><div className="credit-card-bottom"><div><small>limite disponível</small><strong>{money(card.limit - outstanding)}</strong></div><div className="card-holder">{card.name}</div></div></button>; })}</div>
-            {selectedCardData && <section className="card-overview card-surface"><div className="card-overview-title"><div><p className="eyebrow">cartão selecionado</p><h2>{selectedCardData.name}</h2></div><span className={`status-chip ${selectedCardStatus === "paga" ? "green" : selectedCardStatus === "parcialmente paga" ? "amber" : "soft"}`}>{selectedCardStatus}</span></div><div className="card-spend"><div><span>fatura projetada</span><strong>{money(selectedCardBill)}</strong></div><div><span>limite total</span><strong>{money(selectedCardData.limit)}</strong></div></div><ProgressBar value={selectedCardUsed} tone="coral" /><div className="finance-progress-labels"><span>{Math.round(selectedCardUsed)}% utilizado</span><span>disponível {money(selectedCardData.limit - selectedCardBill)}</span></div><div className="card-dates"><span>fecha dia <strong>{selectedCardData.closingDay}</strong></span><span>vence dia <strong>{selectedCardData.dueDay}</strong></span></div><div className="card-management"><button className="primary-button small" onClick={() => { setLaunchAmount(String(selectedCardBill)); setModal("payBill"); }}><Check size={14} /> pagar fatura</button><button className="text-button" onClick={() => openCardEditor(selectedCardData)}><BriefcaseBusiness size={14} /> editar cartão</button><button className="text-button danger-text" onClick={() => deleteCard(selectedCardData.id)}><Trash2 size={14} /> excluir cartão</button></div></section>}
+            <div className="cards-scroller">{store.cards.length === 0 ? <div className="empty-state card-empty"><CreditCard size={26} /><strong>Nenhum cartão cadastrado</strong><span>Cadastre um cartão para começar a controlar suas faturas.</span></div> : store.cards.map((card) => { const cycle = statementKey(new Date().toISOString().slice(0, 10), card.closingDay); const outstanding = cardOutstandingAmount(card, store.expenses, store.payments); return <button key={card.id} className={`credit-card ${card.color} ${selectedCard === card.id ? "selected" : ""}`} onClick={() => setSelectedCard(card.id)}><div className="credit-card-top"><span>{card.bank}</span><CreditCard size={20} /></div><div className="credit-card-number">••••  ••••  ••••  {card.lastFour}</div><div className="credit-card-bottom"><div><small>limite disponível</small><strong>{money(card.limit - outstanding)}</strong></div><div className="card-holder">{card.name}</div></div></button>; })}</div>
+            {selectedCardData && <section className="card-overview card-surface"><div className="card-overview-title"><div><p className="eyebrow">cartão selecionado</p><h2>{selectedCardData.name}</h2></div><span className={`status-chip ${selectedCardStatus === "paga" ? "green" : selectedCardStatus === "parcialmente paga" ? "amber" : "soft"}`}>{selectedCardStatus}</span></div><div className="card-spend"><div><span>fatura projetada</span><strong>{money(selectedCardBill)}</strong></div><div><span>limite total</span><strong>{money(selectedCardData.limit)}</strong></div></div><ProgressBar value={selectedCardUsed} tone="coral" /><div className="finance-progress-labels"><span>{Math.round(selectedCardUsed)}% utilizado</span><span>disponível {money(selectedCardData.limit - selectedCardOutstanding)}</span></div><div className="card-dates"><span>fecha dia <strong>{selectedCardData.closingDay}</strong></span><span>vence dia <strong>{selectedCardData.dueDay}</strong></span></div><div className="card-management"><button className="primary-button small" onClick={() => { setLaunchAmount(String(selectedCardBill)); setModal("payBill"); }}><Check size={14} /> pagar fatura</button><button className="text-button" onClick={() => openCardEditor(selectedCardData)}><BriefcaseBusiness size={14} /> editar cartão</button><button className="text-button danger-text" onClick={() => deleteCard(selectedCardData.id)}><Trash2 size={14} /> excluir cartão</button></div></section>}
             <div className="section-heading compact"><div><p className="eyebrow">lançamentos</p><h2>Despesas do cartão</h2></div><button className="secondary-button small" onClick={() => { setExpenseForm((form) => ({ ...form, cardId: selectedCardData?.id ?? "nubank" })); setModal("expense"); }}><Plus size={15} /> lançar</button></div>
             <div className="expense-list card-surface">{selectedCardExpenses.length === 0 ? <div className="empty-state"><ReceiptText size={26} /><strong>Nenhuma despesa ainda</strong><span>Comece lançando uma compra deste cartão.</span></div> : selectedCardExpenses.map((expense) => <div className="expense-row" key={expense.id}><div className="expense-icon"><ReceiptText size={17} /></div><div className="expense-copy"><strong>{expense.description}</strong><span>{expense.person} · {expense.installments > 1 ? `${expense.installmentsPaid}/${expense.installments} parcelas lançadas` : expense.installmentsPaid ? "paga" : dateLabel(expense.date)}</span></div><div className="expense-value"><strong>{money(expense.amount / expense.installments)}</strong><span>{expense.installments > 1 ? `de ${money(expense.amount)}` : "à vista"}</span></div>{expense.installmentsPaid < expense.installments && <button className="row-action" onClick={() => { setLaunchingExpenseId(expense.id); setLaunchAmount(String(expense.amount / expense.installments)); setModal("launchCard"); }}>lançar</button>}<IconButton label="Editar despesa" onClick={() => openExpenseEditor(expense)}><BriefcaseBusiness size={15} /></IconButton><IconButton label="Remover despesa" onClick={() => deleteExpense(expense.id)}><Trash2 size={15} /></IconButton></div>)}</div>
             <div className="section-heading compact"><div><p className="eyebrow">histórico detalhado</p><h2>Pagamentos dos cartões</h2></div><span className="muted-count">{store.payments.filter((payment) => payment.kind === "card" || payment.kind === "bill").length} lançamentos</span></div>
@@ -593,7 +618,7 @@ export default function Home() {
 
       <nav className="bottom-nav" aria-label="Navegação principal"><button className={activeTab === "overview" ? "active" : ""} onClick={() => goTo("overview")}><LayoutGrid size={20} /><span>Visão geral</span></button><button className={activeTab === "finances" ? "active" : ""} onClick={() => goTo("finances")}><Landmark size={20} /><span>Financiamento</span></button><button className={activeTab === "cards" ? "active" : ""} onClick={() => goTo("cards")}><CreditCard size={20} /><span>Cartões</span></button><button className={activeTab === "reports" ? "active" : ""} onClick={() => goTo("reports")}><BarChart3 size={20} /><span>Relatórios</span></button></nav>
 
-      {modal === "expense" && <ModalShell title="Nova despesa" eyebrow="cartões de crédito" onClose={() => setModal(null)}><form className="form-stack" onSubmit={addExpense}><label>Descrição<input autoFocus value={expenseForm.description} onChange={(event) => setExpenseForm({ ...expenseForm, description: event.target.value })} placeholder="Ex.: supermercado" /></label><label>Quem vai pagar?<input value={expenseForm.person} onChange={(event) => setExpenseForm({ ...expenseForm, person: event.target.value })} placeholder="Nome da pessoa" /></label><div className="form-grid"><label>Valor total<input inputMode="decimal" value={expenseForm.amount} onChange={(event) => setExpenseForm({ ...expenseForm, amount: event.target.value })} placeholder="0,00" /></label><label>Parcelas<input type="number" min="1" max="48" value={expenseForm.installments} onChange={(event) => setExpenseForm({ ...expenseForm, installments: event.target.value })} /></label></div><label>Cartão<select value={expenseForm.cardId} onChange={(event) => setExpenseForm({ ...expenseForm, cardId: event.target.value })}>{store.cards.map((card) => <option value={card.id} key={card.id}>{card.name} · {card.lastFour}</option>)}</select></label><button className="primary-button full" type="submit"><Check size={17} /> salvar despesa</button></form></ModalShell>}
+      {modal === "expense" && <ModalShell title="Nova despesa" eyebrow="cartões de crédito" onClose={() => setModal(null)}><form className="form-stack" onSubmit={addExpense}><label>Descrição<input autoFocus value={expenseForm.description} onChange={(event) => setExpenseForm({ ...expenseForm, description: event.target.value })} placeholder="Ex.: supermercado" /></label><label>Quem vai pagar?<input value={expenseForm.person} onChange={(event) => setExpenseForm({ ...expenseForm, person: event.target.value })} placeholder="Nome da pessoa" /></label><label>Data da despesa<input type="date" value={expenseForm.date} onChange={(event) => setExpenseForm({ ...expenseForm, date: event.target.value })} /></label><div className="form-grid"><label>Valor total<input inputMode="decimal" value={expenseForm.amount} onChange={(event) => setExpenseForm({ ...expenseForm, amount: event.target.value })} placeholder="0,00" /></label><label>Parcelas<input type="number" min="1" max="48" value={expenseForm.installments} onChange={(event) => setExpenseForm({ ...expenseForm, installments: event.target.value })} /></label></div><label>Cartão<select value={expenseForm.cardId} onChange={(event) => setExpenseForm({ ...expenseForm, cardId: event.target.value })}>{store.cards.map((card) => <option value={card.id} key={card.id}>{card.name} · {card.lastFour}</option>)}</select></label><button className="primary-button full" type="submit"><Check size={17} /> salvar despesa</button></form></ModalShell>}
       {modal === "editExpense" && <ModalShell title="Editar despesa" eyebrow="lançamento do cartão" onClose={() => setModal(null)}><form className="form-stack" onSubmit={editExpense}><label>Descrição<input autoFocus value={expenseForm.description} onChange={(event) => setExpenseForm({ ...expenseForm, description: event.target.value })} /></label><label>Quem vai pagar?<input value={expenseForm.person} onChange={(event) => setExpenseForm({ ...expenseForm, person: event.target.value })} /></label><div className="form-grid"><label>Valor total<input inputMode="decimal" value={expenseForm.amount} onChange={(event) => setExpenseForm({ ...expenseForm, amount: event.target.value })} /></label><label>Parcelas<input type="number" min="1" max="48" value={expenseForm.installments} onChange={(event) => setExpenseForm({ ...expenseForm, installments: event.target.value })} /></label></div><label>Cartão<select value={expenseForm.cardId} onChange={(event) => setExpenseForm({ ...expenseForm, cardId: event.target.value })}>{store.cards.map((card) => <option value={card.id} key={card.id}>{card.name} · {card.lastFour}</option>)}</select></label><button className="primary-button full" type="submit"><Check size={17} /> salvar alterações</button></form></ModalShell>}
       {modal === "editCard" && editingCardId && <ModalShell title="Editar cartão" eyebrow="carteira digital" onClose={() => setModal(null)}><form className="form-stack" onSubmit={editCard}><label>Nome do cartão<input autoFocus value={cardForm.name} onChange={(event) => setCardForm({ ...cardForm, name: event.target.value })} /></label><label>Banco ou emissor<input value={cardForm.bank} onChange={(event) => setCardForm({ ...cardForm, bank: event.target.value })} /></label><div className="form-grid"><label>Últimos 4 dígitos<input inputMode="numeric" maxLength={4} value={cardForm.lastFour} onChange={(event) => setCardForm({ ...cardForm, lastFour: event.target.value.replace(/\D/g, "") })} /></label><label>Limite total<input inputMode="decimal" value={cardForm.limit} onChange={(event) => setCardForm({ ...cardForm, limit: event.target.value })} /></label></div><div className="form-grid"><label>Vencimento<input type="number" min="1" max="31" value={cardForm.dueDay} onChange={(event) => setCardForm({ ...cardForm, dueDay: event.target.value })} /></label><label>Fechamento<input type="number" min="1" max="31" value={cardForm.closingDay} onChange={(event) => setCardForm({ ...cardForm, closingDay: event.target.value })} /></label></div><button className="primary-button full" type="submit"><Check size={17} /> salvar cartão</button><button className="text-button danger-text full-danger" type="button" onClick={() => deleteCard(editingCardId)}><Trash2 size={15} /> excluir cartão e lançamentos</button></form></ModalShell>}
       {modal === "card" && <ModalShell title="Novo cartão" eyebrow="carteira digital" onClose={() => setModal(null)}><form className="form-stack" onSubmit={addCard}><label>Nome do cartão<input autoFocus value={cardForm.name} onChange={(event) => setCardForm({ ...cardForm, name: event.target.value })} placeholder="Ex.: Visa Infinite" /></label><label>Banco ou emissor<input value={cardForm.bank} onChange={(event) => setCardForm({ ...cardForm, bank: event.target.value })} placeholder="Ex.: Inter" /></label><div className="form-grid"><label>Últimos 4 dígitos<input inputMode="numeric" maxLength={4} value={cardForm.lastFour} onChange={(event) => setCardForm({ ...cardForm, lastFour: event.target.value.replace(/\D/g, "") })} placeholder="0000" /></label><label>Limite total<input inputMode="decimal" value={cardForm.limit} onChange={(event) => setCardForm({ ...cardForm, limit: event.target.value })} placeholder="0,00" /></label></div><div className="form-grid"><label>Vencimento<input type="number" min="1" max="31" value={cardForm.dueDay} onChange={(event) => setCardForm({ ...cardForm, dueDay: event.target.value })} /></label><label>Fechamento<input type="number" min="1" max="31" value={cardForm.closingDay} onChange={(event) => setCardForm({ ...cardForm, closingDay: event.target.value })} /></label></div><button className="primary-button full" type="submit"><Plus size={17} /> cadastrar cartão</button></form></ModalShell>}
