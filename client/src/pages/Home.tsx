@@ -37,7 +37,7 @@ import {
 const STORAGE_KEY = "finanwise-offline-v1";
 
 type Tab = "overview" | "finances" | "cards" | "reports";
-type Modal = "expense" | "editExpense" | "card" | "editCard" | "launchFinance" | "launchCard" | "anticipate" | "backup" | null;
+type Modal = "expense" | "editExpense" | "card" | "editCard" | "launchFinance" | "launchCard" | "payBill" | "anticipate" | "backup" | null;
 
 type Finance = {
   id: string;
@@ -76,7 +76,7 @@ type Expense = {
 
 type PaymentEntry = {
   id: string;
-  kind: "finance" | "card";
+  kind: "finance" | "card" | "bill";
   referenceId: string;
   label: string;
   installmentNumber?: number;
@@ -84,6 +84,7 @@ type PaymentEntry = {
   paidAmount: number;
   discount: number;
   paidAt: string;
+  cardId?: string;
 };
 
 type Store = {
@@ -104,7 +105,7 @@ const seedStore: Store = {
       financed: 68307.56,
       installment: 2159.58,
       term: 48,
-      paidCount: 0,
+      paidCount: 4,
       firstDue: "2026-05-25",
       monthlyRate: 1.85,
       cet: 2.62,
@@ -232,12 +233,18 @@ export default function Home() {
   const paidProgress = finance ? (finance.paidCount / finance.term) * 100 : 0;
   const remainingLoan = finance ? Math.max(0, finance.term - finance.paidCount) * finance.installment : 0;
   const cardCommitment = useMemo(
-    () => store.expenses.reduce((sum, item) => sum + (item.installments > 1 ? item.amount / item.installments : item.amount), 0),
-    [store.expenses],
+    () => store.cards.reduce((sum, card) => {
+      const bill = store.expenses.filter((expense) => expense.cardId === card.id).reduce((total, expense) => total + expense.amount / expense.installments, 0);
+      const paid = store.payments.find((payment) => payment.kind === "bill" && payment.cardId === card.id);
+      return sum + Math.max(0, bill - (paid?.paidAmount ?? 0));
+    }, 0),
+    [store.cards, store.expenses, store.payments],
   );
   const selectedCardData = store.cards.find((card) => card.id === selectedCard) ?? store.cards[0];
   const selectedCardExpenses = store.expenses.filter((expense) => expense.cardId === selectedCardData?.id);
-  const selectedCardBill = selectedCardExpenses.reduce((sum, expense) => sum + expense.amount / expense.installments, 0);
+  const selectedCardGrossBill = selectedCardExpenses.reduce((sum, expense) => sum + expense.amount / expense.installments, 0);
+  const selectedCardBillPayment = store.payments.find((payment) => payment.kind === "bill" && payment.cardId === selectedCardData?.id);
+  const selectedCardBill = Math.max(0, selectedCardGrossBill - (selectedCardBillPayment?.paidAmount ?? 0));
   const selectedCardUsed = Math.min(100, selectedCardBill / Math.max(1, selectedCardData?.limit ?? 1) * 100);
   const nextDue = finance ? addMonths(finance.firstDue, finance.paidCount) : "2026-09-25";
   const nextInstallmentNumber = finance ? finance.paidCount + 1 : 1;
@@ -287,6 +294,20 @@ export default function Home() {
     setPaymentDate(new Date().toISOString().slice(0, 10));
     setLaunchingFinanceNumber(null);
     setToast(`Parcela ${number}ª lançada. Desconto: ${money(discount)}.`);
+  };
+
+  const payCardBill = () => {
+    if (!selectedCardData || selectedCardGrossBill <= 0) return;
+    const paid = Number(launchAmount.replace(",", ".")) || selectedCardBill;
+    const discount = Math.max(0, selectedCardBill - paid);
+    const entry: PaymentEntry = { id: `payment-${Date.now()}`, kind: "bill", referenceId: selectedCardData.id, cardId: selectedCardData.id, label: `Fatura · ${selectedCardData.name}`, scheduledAmount: selectedCardBill, paidAmount: paid, discount, paidAt: paymentDate };
+    const nextStore = { ...store, payments: [entry, ...store.payments.filter((payment) => !(payment.kind === "bill" && payment.cardId === selectedCardData.id))] };
+    persistStore(nextStore);
+    setStore(nextStore);
+    setModal(null);
+    setLaunchAmount("");
+    setPaymentDate(new Date().toISOString().slice(0, 10));
+    setToast(`Fatura paga. Desconto: ${money(discount)}.`);
   };
 
   const registerCardInstallment = (id: string) => {
@@ -541,12 +562,12 @@ export default function Home() {
         {activeTab === "cards" && (
           <section className="page-section">
             <div className="page-title-row"><div><p className="eyebrow">módulo 02</p><h1>Cartões</h1><p className="subtitle">Limites, compras e quem precisa acertar.</p></div><button className="primary-button" onClick={() => setModal("card")}><Plus size={17} /> novo cartão</button></div>
-            <div className="cards-scroller">{store.cards.map((card) => { const bill = store.expenses.filter((expense) => expense.cardId === card.id).reduce((sum, expense) => sum + expense.amount / expense.installments, 0); return <button key={card.id} className={`credit-card ${card.color} ${selectedCard === card.id ? "selected" : ""}`} onClick={() => setSelectedCard(card.id)}><div className="credit-card-top"><span>{card.bank}</span><CreditCard size={20} /></div><div className="credit-card-number">••••  ••••  ••••  {card.lastFour}</div><div className="credit-card-bottom"><div><small>limite disponível</small><strong>{money(card.limit - bill)}</strong></div><div className="card-holder">{card.name}</div></div></button>; })}</div>
-            {selectedCardData && <section className="card-overview card-surface"><div className="card-overview-title"><div><p className="eyebrow">cartão selecionado</p><h2>{selectedCardData.name}</h2></div><span className="status-chip soft">final {selectedCardData.lastFour}</span></div><div className="card-spend"><div><span>fatura projetada</span><strong>{money(selectedCardBill)}</strong></div><div><span>limite total</span><strong>{money(selectedCardData.limit)}</strong></div></div><ProgressBar value={selectedCardUsed} tone="coral" /><div className="finance-progress-labels"><span>{Math.round(selectedCardUsed)}% utilizado</span><span>disponível {money(selectedCardData.limit - selectedCardBill)}</span></div><div className="card-management"><button className="text-button" onClick={() => openCardEditor(selectedCardData)}><BriefcaseBusiness size={14} /> editar cartão</button><button className="text-button danger-text" onClick={() => deleteCard(selectedCardData.id)}><Trash2 size={14} /> excluir cartão</button></div></section>}
+            <div className="cards-scroller">{store.cards.map((card) => { const bill = store.expenses.filter((expense) => expense.cardId === card.id).reduce((sum, expense) => sum + expense.amount / expense.installments, 0); const paid = store.payments.find((payment) => payment.kind === "bill" && payment.cardId === card.id)?.paidAmount ?? 0; const outstanding = Math.max(0, bill - paid); return <button key={card.id} className={`credit-card ${card.color} ${selectedCard === card.id ? "selected" : ""}`} onClick={() => setSelectedCard(card.id)}><div className="credit-card-top"><span>{card.bank}</span><CreditCard size={20} /></div><div className="credit-card-number">••••  ••••  ••••  {card.lastFour}</div><div className="credit-card-bottom"><div><small>limite disponível</small><strong>{money(card.limit - outstanding)}</strong></div><div className="card-holder">{card.name}</div></div></button>; })}</div>
+            {selectedCardData && <section className="card-overview card-surface"><div className="card-overview-title"><div><p className="eyebrow">cartão selecionado</p><h2>{selectedCardData.name}</h2></div><span className="status-chip soft">final {selectedCardData.lastFour}</span></div><div className="card-spend"><div><span>fatura projetada</span><strong>{money(selectedCardBill)}</strong></div><div><span>limite total</span><strong>{money(selectedCardData.limit)}</strong></div></div><ProgressBar value={selectedCardUsed} tone="coral" /><div className="finance-progress-labels"><span>{Math.round(selectedCardUsed)}% utilizado</span><span>disponível {money(selectedCardData.limit - selectedCardBill)}</span></div><div className="card-management"><button className="primary-button small" onClick={() => { setLaunchAmount(String(selectedCardBill)); setModal("payBill"); }}><Check size={14} /> pagar fatura</button><button className="text-button" onClick={() => openCardEditor(selectedCardData)}><BriefcaseBusiness size={14} /> editar cartão</button><button className="text-button danger-text" onClick={() => deleteCard(selectedCardData.id)}><Trash2 size={14} /> excluir cartão</button></div></section>}
             <div className="section-heading compact"><div><p className="eyebrow">lançamentos</p><h2>Despesas do cartão</h2></div><button className="secondary-button small" onClick={() => { setExpenseForm((form) => ({ ...form, cardId: selectedCardData?.id ?? "nubank" })); setModal("expense"); }}><Plus size={15} /> lançar</button></div>
             <div className="expense-list card-surface">{selectedCardExpenses.length === 0 ? <div className="empty-state"><ReceiptText size={26} /><strong>Nenhuma despesa ainda</strong><span>Comece lançando uma compra deste cartão.</span></div> : selectedCardExpenses.map((expense) => <div className="expense-row" key={expense.id}><div className="expense-icon"><ReceiptText size={17} /></div><div className="expense-copy"><strong>{expense.description}</strong><span>{expense.person} · {expense.installments > 1 ? `${expense.installmentsPaid}/${expense.installments} parcelas lançadas` : expense.installmentsPaid ? "paga" : dateLabel(expense.date)}</span></div><div className="expense-value"><strong>{money(expense.amount / expense.installments)}</strong><span>{expense.installments > 1 ? `de ${money(expense.amount)}` : "à vista"}</span></div>{expense.installmentsPaid < expense.installments && <button className="row-action" onClick={() => { setLaunchingExpenseId(expense.id); setLaunchAmount(String(expense.amount / expense.installments)); setModal("launchCard"); }}>lançar</button>}<IconButton label="Editar despesa" onClick={() => openExpenseEditor(expense)}><BriefcaseBusiness size={15} /></IconButton><IconButton label="Remover despesa" onClick={() => deleteExpense(expense.id)}><Trash2 size={15} /></IconButton></div>)}</div>
-            <div className="section-heading compact"><div><p className="eyebrow">histórico detalhado</p><h2>Pagamentos dos cartões</h2></div><span className="muted-count">{store.payments.filter((payment) => payment.kind === "card").length} lançamentos</span></div>
-            <div className="history-list card-surface">{store.payments.filter((payment) => payment.kind === "card").slice(0, 8).map((payment) => <div className="history-row" key={payment.id}><div className="history-icon coral"><Check size={15} /></div><div className="history-copy"><strong>{payment.label} · {payment.installmentNumber}ª</strong><span>pago em {dateLabel(payment.paidAt, "full")}</span></div><div className="history-values"><strong>{money(payment.paidAmount)}</strong><span>{payment.discount > 0 ? `desconto ${money(payment.discount)}` : "sem desconto"}</span></div></div>)}{store.payments.filter((payment) => payment.kind === "card").length === 0 && <div className="empty-state"><CreditCard size={25} /><strong>Nenhum pagamento lançado manualmente</strong><span>O histórico aparecerá quando você lançar uma parcela.</span></div>}</div>
+            <div className="section-heading compact"><div><p className="eyebrow">histórico detalhado</p><h2>Pagamentos dos cartões</h2></div><span className="muted-count">{store.payments.filter((payment) => payment.kind === "card" || payment.kind === "bill").length} lançamentos</span></div>
+            <div className="history-list card-surface">{store.payments.filter((payment) => payment.kind === "card" || payment.kind === "bill").slice(0, 8).map((payment) => <div className="history-row" key={payment.id}><div className="history-icon coral"><Check size={15} /></div><div className="history-copy"><strong>{payment.kind === "bill" ? payment.label : `${payment.label} · ${payment.installmentNumber}ª`}</strong><span>pago em {dateLabel(payment.paidAt, "full")}</span></div><div className="history-values"><strong>{money(payment.paidAmount)}</strong><span>{payment.discount > 0 ? `desconto ${money(payment.discount)}` : "sem desconto"}</span></div></div>)}{store.payments.filter((payment) => payment.kind === "card" || payment.kind === "bill").length === 0 && <div className="empty-state"><CreditCard size={25} /><strong>Nenhum pagamento lançado manualmente</strong><span>O histórico aparecerá quando você lançar uma parcela.</span></div>}</div>
             <p className="privacy-note"><LockKeyhole size={14} /> Compras e cartões são salvos localmente, sem internet.</p>
           </section>
         )}
@@ -571,6 +592,7 @@ export default function Home() {
       {modal === "card" && <ModalShell title="Novo cartão" eyebrow="carteira digital" onClose={() => setModal(null)}><form className="form-stack" onSubmit={addCard}><label>Nome do cartão<input autoFocus value={cardForm.name} onChange={(event) => setCardForm({ ...cardForm, name: event.target.value })} placeholder="Ex.: Visa Infinite" /></label><label>Banco ou emissor<input value={cardForm.bank} onChange={(event) => setCardForm({ ...cardForm, bank: event.target.value })} placeholder="Ex.: Inter" /></label><div className="form-grid"><label>Últimos 4 dígitos<input inputMode="numeric" maxLength={4} value={cardForm.lastFour} onChange={(event) => setCardForm({ ...cardForm, lastFour: event.target.value.replace(/\D/g, "") })} placeholder="0000" /></label><label>Limite total<input inputMode="decimal" value={cardForm.limit} onChange={(event) => setCardForm({ ...cardForm, limit: event.target.value })} placeholder="0,00" /></label></div><button className="primary-button full" type="submit"><Plus size={17} /> cadastrar cartão</button></form></ModalShell>}
       {modal === "launchFinance" && launchingFinanceNumber && <ModalShell title={`Lançar ${launchingFinanceNumber}ª parcela`} eyebrow="pagamento manual do financiamento" onClose={() => setModal(null)}><div className="launch-context"><CalendarDays size={18} /><span>Valor previsto da parcela: <strong>{money(finance?.installment ?? 0)}</strong></span></div><form className="form-stack" onSubmit={(event) => { event.preventDefault(); registerFinanceInstallment(launchingFinanceNumber); }}><label>Valor pago<input autoFocus inputMode="decimal" value={launchAmount} onChange={(event) => setLaunchAmount(event.target.value)} /></label><label>Data real do pagamento<input type="date" value={paymentDate} onChange={(event) => setPaymentDate(event.target.value)} /></label><div className="discount-preview"><span>desconto aplicado</span><strong>{money(Math.max(0, (finance?.installment ?? 0) - (Number(launchAmount.replace(",", ".")) || 0)))}</strong></div><button className="primary-button full" type="submit"><Check size={17} /> confirmar lançamento</button></form></ModalShell>}
       {modal === "launchCard" && launchingExpenseId && (() => { const launchExpense = store.expenses.find((expense) => expense.id === launchingExpenseId); const scheduled = launchExpense ? launchExpense.amount / launchExpense.installments : 0; const paid = Number(launchAmount.replace(",", ".")) || 0; return <ModalShell title="Lançar parcela do cartão" eyebrow={launchExpense?.description ?? "despesa"} onClose={() => setModal(null)}><div className="launch-context"><ReceiptText size={18} /><span>Parcela prevista: <strong>{money(scheduled)}</strong></span></div><form className="form-stack" onSubmit={(event) => { event.preventDefault(); registerCardInstallment(launchingExpenseId); }}><label>Valor pago<input autoFocus inputMode="decimal" value={launchAmount} onChange={(event) => setLaunchAmount(event.target.value)} /></label><label>Data real do pagamento<input type="date" value={paymentDate} onChange={(event) => setPaymentDate(event.target.value)} /></label><div className="discount-preview"><span>desconto aplicado</span><strong>{money(Math.max(0, scheduled - paid))}</strong></div><button className="primary-button full" type="submit"><Check size={17} /> confirmar lançamento</button></form></ModalShell>; })()}
+      {modal === "payBill" && selectedCardData && <ModalShell title="Pagar fatura" eyebrow={`${selectedCardData.name} · final ${selectedCardData.lastFour}`} onClose={() => setModal(null)}><div className="launch-context"><CreditCard size={18} /><span>Saldo atual da fatura: <strong>{money(selectedCardBill)}</strong></span></div><form className="form-stack" onSubmit={(event) => { event.preventDefault(); payCardBill(); }}><label>Valor pago<input autoFocus inputMode="decimal" value={launchAmount} onChange={(event) => setLaunchAmount(event.target.value)} /></label><label>Data real do pagamento<input type="date" value={paymentDate} onChange={(event) => setPaymentDate(event.target.value)} /></label><div className="discount-preview"><span>desconto / ajuste aplicado</span><strong>{money(Math.max(0, selectedCardBill - (Number(launchAmount.replace(",", ".")) || 0)))}</strong></div><button className="primary-button full" type="submit"><Check size={17} /> confirmar pagamento da fatura</button></form></ModalShell>}
       {modal === "anticipate" && <ModalShell title="Antecipar parcelas" eyebrow="financiamento Santander" onClose={() => setModal(null)}><div className="anticipate-card"><div className="anticipate-icon"><ArrowUpRight size={22} /></div><div><strong>Reduza os juros do contrato</strong><span>Ao antecipar, você deixa de pagar os juros remuneratórios das parcelas escolhidas.</span></div></div><label className="range-label">Quantas parcelas? <strong>{anticipationQty}</strong><input type="range" min="1" max={Math.max(1, finance?.term - (finance?.paidCount ?? 0))} value={anticipationQty} onChange={(event) => setAnticipationQty(Number(event.target.value))} /></label><div className="anticipate-summary"><div><span>valor base</span><strong>{money((finance?.installment ?? 0) * anticipationQty)}</strong></div><div><span>estimativa de desconto</span><strong className="green-text">- {money((finance?.installment ?? 0) * anticipationQty * 0.08)}</strong></div><div className="total-line"><span>total estimado</span><strong>{money((finance?.installment ?? 0) * anticipationQty * 0.92)}</strong></div></div><button className="primary-button full" onClick={confirmAnticipation}><Check size={17} /> confirmar antecipação</button></ModalShell>}
       {modal === "backup" && <ModalShell title="Dados e privacidade" eyebrow="100% offline" onClose={() => setModal(null)}><div className="backup-intro"><div className="backup-icon"><ShieldCheck size={22} /></div><div><strong>Seu controle, só seu</strong><span>As informações ficam no armazenamento deste dispositivo. Faça backups periódicos para não perder nada.</span></div></div><div className="backup-actions"><button className="backup-action" onClick={exportBackup}><span><Download size={18} /></span><div><strong>Fazer backup</strong><small>Baixar arquivo JSON</small></div><ChevronRight size={17} /></button><button className="backup-action" onClick={() => importInput.current?.click()}><span><Upload size={18} /></span><div><strong>Restaurar backup</strong><small>Usar um arquivo salvo</small></div><ChevronRight size={17} /></button><input ref={importInput} type="file" accept="application/json,.json" hidden onChange={importBackup} /><button className="backup-action danger" onClick={resetData}><span><RotateCcw size={18} /></span><div><strong>Restaurar demonstração</strong><small>Voltar aos dados do contrato</small></div><ChevronRight size={17} /></button></div></ModalShell>}
       {toast && <div className="toast"><Check size={16} /> {toast}</div>}
