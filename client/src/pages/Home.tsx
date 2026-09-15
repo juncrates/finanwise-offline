@@ -968,7 +968,7 @@ export default function Home() {
 
               <div className="finance-details">
                 <div>
-                  <span>total economizado</span>
+                  <span>Descontos</span>
                   <strong style={{ color: "#4d936e" }}>{money(totalDiscounts)}</strong>
                 </div>
                 <div>
