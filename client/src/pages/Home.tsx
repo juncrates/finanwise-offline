@@ -324,6 +324,18 @@ function ModalShell({ title, eyebrow, onClose, children }: { title: string; eyeb
   );
 }
 
+function getCurrentDateLabel(): string {
+  const now = new Date();
+  const days = ['domingo', 'segunda-feira', 'terça-feira', 'quarta-feira', 'quinta-feira', 'sexta-feira', 'sábado'];
+  const months = ['janeiro', 'fevereiro', 'março', 'abril', 'maio', 'junho', 'julho', 'agosto', 'setembro', 'outubro', 'novembro', 'dezembro'];
+  
+  const dayName = days[now.getDay()];
+  const day = now.getDate();
+  const month = months[now.getMonth()];
+  
+  return `${dayName}, ${day} de ${month}`;
+}
+
 export default function Home() {
   const [store, setStore] = useState<Store>(() => safeLoad());
   const [activeTab, setActiveTab] = useState<Tab>("overview");
@@ -851,7 +863,7 @@ export default function Home() {
       <main className="main-content">
         <section className="welcome-row">
           <div>
-            <p className="eyebrow">terça-feira, 15 de setembro</p>
+            <p className="eyebrow">{getCurrentDateLabel()}</p>
             <h1>
               Olá, Josenildo <span className="wave">✦</span>
             </h1>
